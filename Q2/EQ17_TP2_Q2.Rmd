@@ -1,0 +1,399 @@
+---
+title: "EQ17_TP2_Q2 - Commercialisation et prévisibilité du succès de produits"
+author: 
+- Jean-francois Paty (906250500)
+- Émie Smith Brousseau (111255191)
+- Leila Maouloud (111243344)
+
+date: "3 novembre 2019"
+output: 
+  html_document:
+    pandoc_args: --number-sections
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                     warning = FALSE,
+                    message = FALSE)
+```
+
+```{r}
+# Chargement des librairies nécessaires
+library(tidyverse)
+library(caret)
+library(rpart.plot)
+library(pROC)
+
+
+```
+
+# Préparation des données
+
+```{r}
+# Chargement des données
+filename_vin <- 'data/Q2_data.tsv'
+data_vin <- read_tsv(filename_vin)
+
+#Vérification des données manquantes:
+data_vin %>%summarize(na_count = sum(is.na(.)))
+head(data_vin %>% filter_all(any_vars(is.na(.))),n=3)
+
+
+#Vérification du type de chaque colonne et du nombre d'observations:
+str(data_vin)
+
+# Affichage de queslques lignes
+head(data_vin)
+levels(data_vin$Class)
+
+#Modification de la colonne Class en type Factor
+
+data_vin$Class <- as.factor(data_vin$Class)
+
+```
+Il n'y a aucune données manquantes.
+
+Selon l'énoncé du TP chaque colonne représente une caractéristique du vin. Nous conservons les colonnnes pour la contruction du modéle de classification.
+
+
+```{r}
+#Partitionnement des données en ensemble d’entraînement et de test
+
+# fixation de la valeur de la variable aléatoire à 999
+set.seed(999)
+
+train_vin_index <- createDataPartition(y = data_vin$Class,
+                                            p = 0.7,
+                                            list = FALSE,
+                                            times = 1)
+
+#Création de la table d'observations pour l'entrainement
+train_vin <- data_vin[train_vin_index,]
+
+#Création de la table d'observations pour les tests
+test_vin <- data_vin[-train_vin_index,]
+
+
+```
+# Premier modéle : Arbre de décision
+
+Le jeu de données d'entrainement contient `r nrow(train_vin)` obervations
+Le jeu de données de test contient `r nrow(test_vin)` obervations
+
+## Entrainement
+### Paramétre du modéle d'apprentissage Arbre de décision
+
+La première étape consiste à préparer l’entraînement en configurant les routines qui permettront de sélectionner les meilleurs paramètres possible parmi un ensemble de paramètres choisis.
+
+Ici, on indique que nous souhaitons faire une validation croisée en 10 partitions (10-fold cross-validation) :
+```{r}
+#validation croisée en 10 partitions (10-fold cross-validation)
+dt_control <- trainControl(method= "cv", number=10)
+
+#profondeur maximale de l'arbre:
+dt_tune_grid = expand.grid(maxdepth = 1:25)
+
+```
+Selon la documentation de Caret, le modéle de type "rpart2" ne nécessite qu'un seul paramétre en entrée: maxdepth.
+maxdepth est un paramètre qui contrôle la profondeur maximale de l’arbre de décision créé
+par l’algorithme d’apprentissage. Nous faisons varier la valeur de 1 à 25
+
+```{r}
+#Création du modéle
+
+dt_modele_rds_Q2 <- 'data/dt_modele_rds_Q2.rds'
+if(!file.exists(dt_modele_rds_Q2)) {
+  dt_model <- train(Class ~ .,
+          data = train_vin,
+          trControl = dt_control,
+          method = 'rpart2',
+          tuneGrid = dt_tune_grid)
+  write_rds(dt_model, dt_modele_rds_Q2)
+  } else {
+    dt_model <- read_rds(dt_modele_rds_Q2)
+          }
+```
+## Évaluation avec les données d'entrainement
+
+_Affichage du modéle_
+
+Les meilleurs paramètres sont `r dt_model$bestTune`
+
+```{r}
+dt_model$finalModel
+
+#Représentataion graphique 
+
+prp(dt_model$finalModel,
+  box.palette = "Reds",
+  type = 5,
+  extra = 101)
+
+```
+
+_Visualisation de la performance pendant l'entrainement_
+
+```{r}
+
+#Visualisation de la performance durant l'entrainement
+ggplot(dt_model$results,
+       aes(x = maxdepth,
+          y = Accuracy)) +
+  geom_point()
+
+```
+
+On peut voir dans le graphique ci-dessus, que l'exactitude augmente fortement à partir de 3 jusqu'à 6.
+L' exactitude se stabilise aprés 7.
+
+_Visualisation du modéle avec les données d'entrainement_
+
+Nous utilisons la matrice de confusion pour analyser la performance du modéle sur le critére de l'exactitude (Accuracy).
+
+
+```{r}
+# Prediction avec le jeu d'entrainement
+dt_train_pred_class <- predict(dt_model, train_vin)
+
+#Matrice de confusion avec le jeu d'entrainement
+
+dt_train_conf_mat = confusionMatrix(dt_train_pred_class,
+                reference = train_vin$Class,
+                positive = 'yes')
+dt_train_conf_mat
+```
+Avec les données d'entrainement l'exactitude est de `r dt_train_conf_mat$overall[1]`
+
+## Evaluation du modéle avec les données de test
+
+```{r}
+# Prediction avec le jeu de test
+dt_test_pred_class <- predict(dt_model, test_vin)
+dt_test_pred_class %>% head(5)
+
+#Matrice de confusion avec le jeu de test
+
+dt_test_conf_mat = confusionMatrix(dt_test_pred_class,
+                reference = test_vin$Class,
+                positive = 'yes')
+dt_test_conf_mat
+```
+Avec les données de test l'exactitude est de `r dt_test_conf_mat$overall[1]`
+
+
+# Deuxieme modéle : Réseau de neurones
+
+## Entrainement
+Pour ce modéle nous retirons les colonnes qui sont au format caractére. Nous ne conservons que les colonnes numérique.
+
+### Paramétre du modéle d'apprentissage Réseau de neurones
+
+Ici, on indique que nous souhaitons faire une validation croisée en 10 partitions (10-fold cross-validation) :
+
+
+```{r}
+
+#validation croisée en 10 partitions (10-fold cross-validation)
+nn_control_Q2 <- trainControl(method= "cv", number=10)
+
+nn_tune_grid_Q2 <-  expand.grid(decay = c(0, 0.01, .1),
+                        size=c(0:10))
+#Suppression des colonnes de type caractére
+nn_train_col_purge <- select(train_vin, -in01, -in09, -in16)
+
+
+
+nn_modele_rds_Q2 <- 'data/nn_modele_rds_Q2.rds'
+if(!file.exists(nn_modele_rds_Q2)) {
+  nn_model_Q2_purge <- train(Class ~ .,
+                data = nn_train_col_purge,
+                tunegrid = expand.grid(decay = c(0, 0.01, .1),
+                                       size = c(1:10)),
+                method = 'nnet',
+                trControl = nn_control_Q2,
+                preProc = c('center', 'scale'))
+  write_rds(nn_model_Q2_purge, nn_modele_rds_Q2)
+  } else {
+    nn_model_Q2_purge <- read_rds(nn_modele_rds_Q2)
+}
+
+
+```
+
+## Évaluation avec les données d'entrainement
+
+_Visualisation de la performance pendant l'entrainement_
+
+```{r}
+
+# Prediction avec le jeu d'entrainement
+nn_train_pred_class <- predict(nn_model_Q2_purge, train_vin)
+
+#Matrice de confusion avec le jeu d'entrainement
+
+nn_train_conf_mat = confusionMatrix(nn_train_pred_class,
+                reference = train_vin$Class,
+                positive = 'yes')
+nn_train_conf_mat
+
+#Meilleur parametre
+nn_model_Q2_purge$bestTune
+
+ggplot(nn_model_Q2_purge$results,
+      aes(x = size,
+      y = Accuracy)) +
+  geom_point()
+
+```
+
+Sur le tableau ci-dessus, la qualité de l'exactitude est à son maximun lorsque le nombre de couche est à 5.
+
+## Evaluation du modéle avec les données de test
+
+
+```{r}
+# Prediction avec le jeu de test
+nn_test_pred_class <- predict(nn_model_Q2_purge, test_vin)
+nn_test_pred_class %>% head(5)
+
+#Matrice de confusion avec le jeu de test
+
+nn_test_conf_mat = confusionMatrix(nn_test_pred_class,
+                reference = test_vin$Class,
+                positive = 'yes')
+nn_test_conf_mat
+```
+Avec les données du jeu de test l'exactitude est `r nn_test_conf_mat$overall[1]`
+
+
+# Comparaison des deux modèles
+
+
+## Courbe ROC Modéle d'arbre de décision
+
+Pour afficher des courbes ROC, il faut s’assurer que caret identifie la probabilité d’appartenance.
+
+_Modéle d'arbre de décision_
+
+```{r}
+#Prédiction avec probabilité d'appartenance à la classe
+
+dt_pred_prob <- predict(dt_model,
+                        test_vin,
+                        type = 'prob')
+dt_pred_prob %>% head(5)
+
+#preparation des courbes ROC Decision Tree
+dt_roc_curve <- roc(response = test_vin$Class,
+                    predictor = dt_pred_prob[,'yes'],
+                    levels = levels(test_vin$Class))
+
+```
+
+```{r}
+#Visualisation des courbes ROC Decision Tree
+df_roc_curve_dt = tibble(x = 1 - dt_roc_curve$specificities,
+                          y = dt_roc_curve$sensitivities)
+
+#tuto6a
+
+ggplot(df_roc_curve_dt,
+        aes(x = x,
+        y = y)) +
+  geom_line(colour='blue') +
+  geom_point() +
+  geom_abline(slope=1,
+              intercept = 0,
+              linetype='dashed') +
+  coord_fixed(xlim = c(0, 1.13),
+              ylim = c(0, 1.13)) +
+  labs(x='Taux de faux positifs (1 - specificity)',
+      y='Taux de vrais positifs (sensitivity)',
+      title='Courbe ROC - Arbre de décision') +
+  geom_text(aes(label=paste0('(',
+                            round(x, 2),
+                            ',',
+                            round(y, 2),
+                            ')'),
+                hjust=-0.05,
+                vjust=1),
+          size = 2) +
+  annotate('text',
+          x=0.5,
+          y=0.25,
+          label = paste('AUC =',
+                        round(auc(dt_roc_curve), 2)),
+          size = 3)
+
+```
+
+
+
+## Courbe ROC Modéle réseau de neurone
+
+```{r}
+# Prédiction avec les données de test
+nn_predict_test_Q2 <- predict(nn_model_Q2_purge,
+                              test_vin,
+                              type = 'prob')
+head(nn_predict_test_Q2)
+
+
+#preparation des courbes ROC Decision Tree
+dt_roc_curve <- roc(response = test_vin$Class,
+                    predictor = dt_pred_prob[,'yes'],
+levels = levels(test_vin$Class))
+
+
+#preparation des courbes ROC - Réseau de Neurones
+nn_roc_curve <- roc(response = test_vin$Class,
+                    predictor = nn_predict_test_Q2[,'yes'])
+
+```
+```{r}
+#Visualisation des courbes ROC Reseau neurones
+df_roc_curve_nn = tibble(x = 1 - nn_roc_curve$specificities,
+                        y = nn_roc_curve$sensitivities)
+
+#Graphique
+ggplot(df_roc_curve_nn,
+        aes(x = x,
+        y = y)) +
+  geom_line(colour='red')+
+  geom_abline(slope=1,
+              intercept = 0,
+              linetype='dashed')+
+
+  coord_fixed(xlim = c(0, 1.13),
+              ylim = c(0, 1.13))+
+  labs(x='Taux de faux positifs (1 - specificity)',
+      y='Taux de vrais positifs (sensitivity)',
+      title='Courbe ROC - Réseau neurones')+
+  annotate('text',
+         x=0.5,
+        y=0.25,
+       label = paste('AUC =',
+                    round(auc(nn_roc_curve), 2)),
+     size = 3)
+
+```
+
+Le modéle à base de Neurones est plus performant dans notre cas.
+L'exactitude des prédictions est supérieure :
+
+Réseau de neurones : `r nn_test_conf_mat$overall[1]`
+Arbre de décision : `r dt_test_conf_mat$overall[1]`
+
+L'aire sous la courbe des résultats étant plus grande pour le reéseau de neurones, il prédit donc mieux que l'arbre de décision 
+
+Aire sous la courbe ROC du Réseau de neurones `r auc(nn_roc_curve)`
+Aire sous la courbe ROC de l'Arbre de décision `r auc(dt_roc_curve)`
+
+
+```{r}
+nn_test_conf_mat$overall[1]
+dt_test_conf_mat$overall[1]
+```
+
+
