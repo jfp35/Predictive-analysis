@@ -1,9 +1,7 @@
 ---
 title: "EQ17_TP2_Q2 - Commercialisation et prévisibilité du succès de produits"
 author: 
-- Jean-francois Paty (906250500)
-- Émie Smith Brousseau (111255191)
-- Leila Maouloud (111243344)
+- Jean-francois Paty 
 
 date: "3 novembre 2019"
 output: 
