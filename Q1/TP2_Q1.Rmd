@@ -1,0 +1,453 @@
+---
+title: "EQ17_TP2_Q1 - Estimation de l’efficacité d’une opération de recherche en mer"
+author: 
+- Jean-francois Paty
+
+
+date: "3 novembre 2019"
+output: 
+  html_document:
+    pandoc_args: --number-sections
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                     warning = FALSE,
+                    message = FALSE)
+```
+
+```{r}
+# Chargement des librairies nécessaires
+library(tidyverse)
+library(caret)
+
+```
+
+# Préparation des données
+
+```{r}
+# Chargement des données
+filename_recherche <- 'data/Q1_data.txt'
+data_recherche <- read_csv(filename_recherche)
+
+
+#Vérification des données manquantes:
+data_recherche %>%summarize(na_count = sum(is.na(.)))
+head(data_recherche %>% filter_all(any_vars(is.na(.))),n=3)
+
+
+#Vérification du type de chaque colonne et du nombre d'observations:
+str(data_recherche)
+
+# Affichage de queslques lignes
+head(data_recherche)
+
+```
+Il n'y a aucune données manquantes.
+Chaque colonne est au format numérique et comporte bien des données numériques.
+Comme nous n'avons pas l'information sur le sens des colonnes, nous ne pouvons en supprimer.
+
+Le découpage des données d'entrainement va être fait pour un ratio de 70% pour les données d'entraiement et 30% pour les données de tests.
+
+Les valeurs des colonnes semblent avoir des échelles différentes. 
+Par conséquent nous allons faire un pré-processing  des données pour limiter cet effet d'échelle.
+
+```{r}
+#Partitionnement des données en ensemble d’entraînement et de test
+
+# fixation de la valeur de la variable aléatoire à 999
+set.seed(999)
+
+train_recherche_index <- createDataPartition(y = data_recherche$outcome,
+                                            p = 0.7,
+                                            list = FALSE,
+                                            times = 1)
+
+#Création de la table d'observations pour l'entrainement
+train_recherche <- data_recherche[train_recherche_index,]
+
+#Création de la table d'observations pour les tests
+test_recherche <- data_recherche[-train_recherche_index,]
+
+
+#Vérification de la corrélation des colonnes x
+too_high_col <- train_recherche %>% select(- outcome)
+too_high <-  findCorrelation(cor(too_high_col), cutoff = .90)
+too_high
+
+train_recherche_col <- train_recherche %>% select(-too_high)
+test_recherche_col <- test_recherche %>% select(-too_high)
+
+```
+
+# Premier modéle : k-nearest neighbors (k plus proche voisin)
+
+Le jeu de données d'entrainement contient `r nrow(train_recherche)` obervations
+Le jeu de données de test contient `r nrow(test_recherche)` obervations
+
+## Entrainement
+### Paramétre du modéle d'apprentissage Knn
+
+La première étape consiste à préparer l’entraînement en configurant les routines qui permettront de sélectionner les meilleurs paramètres possible parmi un ensemble de paramètres choisis.
+
+Ici, on indique que nous souhaitons faire une validation croisée en 10 partitions (10-fold cross-validation) :
+```{r}
+#validation croisée en 10 partitions (10-fold cross-validation)
+k_control <- trainControl(method= "cv", number=10)
+
+```
+Selon la documentation de Caret, l'algorithme Knn ne nécessite qu'un seul paramétre en entrée le nombre de K voisins.
+
+Nous allons lancer l'apprentissage avec un k pouvant varier de 1 à 30
+
+```{r}
+# Variable de variation de k
+k_max <- expand.grid(k = seq(1, 30, by = 1))
+
+# mise à l'échelle des colonnes:
+preProcValues <- preProcess(train_recherche, method = c("center", "scale"))
+
+#Apprentissage :
+
+k_modele_rds_filename <- 'data/k_modele_rds_filename.rds'
+if(!file.exists(k_modele_rds_filename)) {
+  k_model <- train(outcome ~ .,
+                data=train_recherche,
+                trControl = k_control,
+                method = 'knn',
+                tuneGrid=k_max,
+                preProcess = c("center","scale")
+              )
+  write_rds(k_model, k_modele_rds_filename)
+  } else {
+    k_model <- read_rds(k_modele_rds_filename)
+          }
+```
+## Évaluation avec les données d'entrainement
+
+_Affichage du modéle_
+
+Les meilleurs parametres sont `r k_model$bestTune`
+
+```{r}
+k_model
+```
+
+Le critére de sélection de la meilleure valeur est basé sur la racine de l'erreur quadratique moyenne la plus faible possible. 
+
+_Visualisation de la performance pendant l'entrainement_
+
+```{r}
+
+ggplot(k_model$results,
+aes(x = k,
+y = RMSE)) +
+geom_point() + 
+  scale_x_continuous("k", breaks = seq(1,30, by =2))
+
+```
+
+_Visualisation des résidus dans le jeu d'entrainement_
+
+
+```{r}
+# Prédiction avec les données du jeu d'entrainement
+k_predict_train <- predict(k_model,train_recherche)
+
+```
+
+Pour rappel, les résidus sont les différences entre les valeurs observées et les valeurs approximées (prédites) par le modèle: 
+
+```{r}
+#calcul des résidus pour le Knn sur le jeu d'entrainement
+valeur_observe <- train_recherche$outcome
+valeur_predite <- k_predict_train
+residuel <- tibble(real_y = train_recherche$outcome, reste = train_recherche$outcome - valeur_predite)
+
+head(residuel)
+
+#visualisation des résidus sur le jeu d'entrainement
+ggplot(data=residuel,aes(x=real_y,y=reste)) +
+  geom_point()
+
+#l’histogramme de la distribution des résidus:
+ggplot(data=residuel, aes(x=reste))+
+  geom_histogram()
+
+```
+
+## Evaluation du modéle avec les données de test
+
+
+```{r}
+# Prédiction avec les données de test
+k_predict_test <- predict(k_model,test_recherche)
+str(k_predict_test)
+
+#Puis, nous utilisons la fonction postResample pour calculer les métriques sur l’ensemble de test.
+#postResample(pred = nnet_pred,
+#obs = test_y_nnet) 
+# solTestY: les sorties du jeu de test;
+k_RMSE <- postResample(pred = k_predict_test,
+             obs = test_recherche$outcome)
+k_RMSE
+```
+
+La valeur du critére RMSE est légérement supérieure à celle calculée lors de la phase d'apprentissage
+
+_Visualisation des résidus avec le jeu de données de test_
+
+
+
+```{r}
+#Pour rappel, les résidus sont les différences entre les valeurs observées et les valeurs
+#approximées (prédites) par le modèle: 
+
+#calcul des résidus pour le Knn sur le jeu de tests
+valeur_observe_test <- test_recherche$outcome
+valeur_predite_test <- k_predict_test
+residuel_test <- tibble(real_y = valeur_observe_test, reste = valeur_observe_test - valeur_predite_test)
+
+head(residuel_test)
+
+#visualisation des résidus sur le jeu d'entrainement
+ggplot(data=residuel_test,aes(x=real_y,y=reste)) +
+  geom_point()
+
+#l’histogramme de la distribution des résidus:
+ggplot(data=residuel_test, aes(x=reste))+
+  geom_histogram()
+```
+Dans le diagramme histogramme, l’erreur semble bien distribuée autour de 0 de sorte qu’on sous-estime et surestime parfois la valeur
+
+# Deuxiéme modéle : Réseau de neurones.
+
+Pour le deuxiéme modéle, nous choissisons d'utiliser les alogorithmes d'un réseau de neurones pour l'apprentissage
+
+## Entrainement
+### Paramétre du modéle d’apprentissage Réseau de neurones
+
+Ici, on indique que nous souhaitons faire une validation croisée en 10 partitions (10-fold cross-validation).
+Selon la documentation de Caret, les paramétres possibles sont : 
+
+size (#Hidden Units) : le nombre de neurones sur la couche cachée : de 1 à 10
+decay (Weight Decay) : contrôle la mise à jour des poids à chaque itération de 0.1 à 0.5
+
+
+
+```{r}
+#validation croisée en 10 partitions (10-fold cross-validation)
+nn_control <- trainControl(method= "cv", number=10)
+
+#nn_tune_grid = expand.grid(decay = c(0, 0.01, .1), size = c(1:5))
+
+nn_tune_grid <-  expand.grid(decay = c(0, 0.01, .1),
+                        size=c(0:10))
+#Apprentissage :
+
+nn_train_x <- select(train_recherche, -outcome)
+nn_train_y <- train_recherche$outcome
+
+
+nn_tune_grid2 <- expand.grid(size = seq(from = 1, to = 10, by = 1),
+                       decay = seq(from = 0, to = 0.5, by = 0.1))
+```
+
+
+```{r}
+
+nn_modele_rds_filename <- 'data/nn_modele_rds_filename.rds'
+if(!file.exists(nn_modele_rds_filename)) {
+  nn_model <- train(nn_train_x, nn_train_y,
+                  trControl = nn_control,
+                  method = 'nnet',
+                  linout = TRUE,
+                  preProc = c('center', 'scale'),
+                  tuneGrid = nn_tune_grid2,
+                  metric = 'RMSE'
+                  )
+write_rds(nn_model, nn_modele_rds_filename)
+} else {
+nn_model <- read_rds(nn_modele_rds_filename)
+}
+
+
+nn_model$bestTune
+nn_model$finalModel
+
+postResample(pred = nn_model$finalModel$fitted.values,
+            obs = nn_train_y)
+
+
+```
+## Évaluation avec les données d'entraiement
+
+_Visualisation des résidus dans le jeu d'entrainement_
+
+```{r}
+# Graphique des résidus sur le jeu d'entrainement
+ggplot(data = tibble(resid = nn_model$finalModel$residuals),
+      aes(x = resid)) +
+  geom_histogram()
+
+
+nn_train_fitted_resid <- tibble(fitted = nn_model$finalModel$fitted.values,
+resid = nn_model$finalModel$residuals)
+
+ggplot(data = nn_train_fitted_resid,
+      aes(x = fitted,
+      y = resid)) +
+  geom_point()
+
+
+```
+
+
+l’erreur est relativement bien distribuée autour de la droite en resid = 0. Le modèle semble à la fois faire des erreurs à la baisse et à la hausse.
+
+
+## Evaluation avec les données de test
+
+_Affichage du modéle_
+
+Les meilleurs parametres sont `r nn_model$bestTune`
+
+```{r}
+# Prédiction avec les données de test
+nn_predict_test <- predict(nn_model,test_recherche)
+str(nn_predict_test)
+
+#Puis, nous utilisons la fonction postResample pour calculer les métriques sur l’ensemble de test.
+
+# solTestY: les sorties du jeu de test;
+nn_RMSE <- postResample(pred = nn_predict_test,
+             obs = test_recherche$outcome)
+nn_RMSE
+
+```
+La valeur RMSE est inférieure à celle du modéle Knn
+
+
+_Visualisation des résidus avec le jeu de test_
+
+```{r}
+# Cacul des résidus 
+nn_test_resid = valeur_observe_test - nn_predict_test
+
+#Graphique en histogramme
+
+ggplot(data = tibble(resid = nn_test_resid),
+      aes(x = resid)) +
+  geom_histogram()
+
+#Graphique nuage de point :
+
+nn_residuel_test <- tibble(real_y = valeur_observe_test, reste = nn_test_resid)
+
+head(nn_residuel_test)
+
+#visualisation des résidus sur le jeu de test
+ggplot(data=nn_residuel_test,aes(x=real_y,y=reste)) +
+  geom_point()
+
+# visualisation prediction et valeur observée
+nn_test_fitted_real <- tibble(real_y = valeur_observe_test,
+                              pred_y = nn_predict_test)
+
+
+```
+# Comparaison des deux modèles
+
+```{r}
+
+k_test_fitted_real <- tibble(real_y = test_recherche$outcome,
+                              pred_y = k_predict_test)
+# Graphique Knn
+ggplot(data = k_test_fitted_real,
+aes(x = real_y,y = pred_y)) +
+geom_point()+
+geom_point(aes(x = real_y,
+y = real_y),
+color = 'green',
+shape=5) +
+coord_fixed()+
+   labs(x = "Valeur observée", y = "Valeur prédite", title = "Knn")
+
+
+# Graphique Réseau neurone
+ggplot(data = nn_test_fitted_real,
+  aes(x = real_y, y = pred_y)) +
+  geom_point() +
+  geom_point(aes(x = real_y, y= real_y),colour="blue") +
+  coord_fixed() +
+   labs(x = "Valeur observée", y = "Valeur prédite", title = "Réseau de Neurones")
+
+
+```
+
+Le critére qui a été choisi pour cette analyse en régression est le RMSE. Ce critére permet de calculer les erreurs d'estimation des 2 modéles.
+
+Le modéle ayant la plus faible RMSE est le réseau de neurones comparativemeent au modéle Knn.
+Le modéle basé sur le reseau de neurones est donc le meilleur pour ce cas.
+
+RMSE Réseau de neurone : `r nn_RMSE`
+RMSE Knn               : `r k_RMSE`
+
+Visuellement on peut oberver aussi que les résidus du réseau de neurones sont plus concentrés autour de la droite 0 qui est la droite parfaite, que ceux du modéle Knn.
+
+```{r}
+# Sauvegarde dans un fichier du meilleur modéle
+
+best_modele_rds_filename <- 'data/best_modele_rds_filename.rds'
+if(!file.exists(best_modele_rds_filename))
+  {  best_model <- nn_model
+      write_rds(best_model, best_modele_rds_filename)
+  }
+
+
+```
+# Compétition
+## Premier requis
+
+Le nom du modéle en compéttion est TopduTop
+nom de fichier : Q1_challenger_T17_TopduTop.rds
+
+## Deuxième requis
+
+```{r}
+#Chargement du modéle challenger 
+top_modele_rds_filename <- 'data/Q1_challenger_T17_TopduTop.rds'
+
+
+if(file.exists(top_modele_rds_filename)) {
+  TopduTop <- read_rds(top_modele_rds_filename)
+
+}
+
+#Chargement des données pour la compétition 
+filename_competition <- 'data/data_competition.txt'
+data_competition <- read_csv(filename_competition)
+
+#Retire les valuers NA si il y en a :
+data_competition <- na.omit(data_competition)
+
+
+```
+## Troisième requis
+
+```{r}
+# Prédiction avec les données de compétition
+competition_predict <- predict(TopduTop,data_competition)
+
+#calcul de la RMSE
+competition_RMSE <- postResample(pred = competition_predict,
+             obs = data_competition$outcome)
+
+#Affichage de la RMSE : 
+competition_RMSE
+
+```
+
+
+
